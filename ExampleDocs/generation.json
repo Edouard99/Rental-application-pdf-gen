@@ -1,0 +1,10 @@
+{
+    "John Doe": {
+        "alias": "John DOE (Tenant)",
+        "order": 2
+    },
+    "Robert Smith": {
+        "alias": "Robert SMITH (Tenant - also called BOB)",
+        "order": 1
+    }
+}
