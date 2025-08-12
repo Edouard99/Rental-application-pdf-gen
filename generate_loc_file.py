@@ -15,9 +15,14 @@ import logging
 try:
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter, A4
-    from reportlab.lib.colors import Color
+    from reportlab.lib.colors import Color, black, blue
     from reportlab.lib.units import inch
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
     from PyPDF2 import PdfReader, PdfWriter
+    from PyPDF2.generic import AnnotationBuilder
 except ImportError as e:
     print(f"Required libraries not installed: {e}")
     print("Please run: pip install reportlab PyPDF2")
@@ -159,6 +164,316 @@ class PDFWatermarker:
             logger.error(f"Error watermarking {input_path}: {e}")
             return False
     
+    
+    def create_title_page(self, title_text, output_path):
+        """Create a title page PDF."""
+        packet = BytesIO()
+        can = canvas.Canvas(packet, pagesize=A4)
+        
+        width, height = A4
+        
+        # Set title
+        can.setFont("Helvetica-Bold", 24)
+        title_width = can.stringWidth(title_text, "Helvetica-Bold", 24)
+        can.drawString((width - title_width) / 2, height * 0.7, title_text)
+        
+        # Add date
+        from datetime import datetime
+        date_text = f"Généré le {datetime.now().strftime('%d/%m/%Y')}"
+        can.setFont("Helvetica", 12)
+        date_width = can.stringWidth(date_text, "Helvetica", 12)
+        can.drawString((width - date_width) / 2, height * 0.3, date_text)
+        
+        can.save()
+        packet.seek(0)
+        
+        # Save title page
+        with open(output_path, 'wb') as f:
+            f.write(packet.getvalue())
+        
+        return output_path
+    
+    def create_table_of_contents(self, document_info, output_path):
+        """Create a table of contents PDF with clickable links."""
+        packet = BytesIO()
+        can = canvas.Canvas(packet, pagesize=A4)
+        
+        width, height = A4
+        y_position = height - 50
+        page_num = 0
+        
+        # Store link information for later processing
+        self._toc_links = []
+        self._toc_pages = 0
+        
+        # Title
+        can.setFont("Helvetica-Bold", 18)
+        title = "Table des Matières"
+        title_width = can.stringWidth(title, "Helvetica-Bold", 18)
+        can.drawString((width - title_width) / 2, y_position, title)
+        y_position -= 40
+        
+        # Group by person (folder name)
+        current_person = None
+        
+        for info in document_info:
+            folder_name = info['folder']
+            doc_name = info['document']
+            target_page = info['page']
+            
+            # Check if we need a new person header
+            if current_person != folder_name:
+                current_person = folder_name
+                y_position -= 20
+                
+                # Person name (folder name)
+                can.setFont("Helvetica-Bold", 14)
+                can.setFillColor(black)
+                can.drawString(50, y_position, folder_name)
+                y_position -= 25
+            
+            # Document entry
+            can.setFont("Helvetica", 11)
+            can.setFillColor(blue)
+            
+            # Create dots for alignment
+            doc_text = f"    {doc_name}"
+            page_text = f"page {target_page}"
+            
+            # Calculate positions
+            doc_width = can.stringWidth(doc_text, "Helvetica", 11)
+            page_width = can.stringWidth(page_text, "Helvetica", 11)
+            
+            # Draw document name (this will be the clickable area)
+            can.drawString(50, y_position, doc_text)
+            
+            # Draw dots
+            dots_start = 50 + doc_width + 10
+            dots_end = width - 50 - page_width - 10
+            dots_length = dots_end - dots_start
+            num_dots = int(dots_length / 4)  # Approximate spacing
+            
+            can.setFillColor(black)
+            dot_text = "." * max(0, num_dots)
+            can.drawString(dots_start, y_position, dot_text)
+            
+            # Draw page number
+            can.setFillColor(blue)
+            can.drawString(width - 50 - page_width, y_position, page_text)
+            
+            # Store link information (coordinates are in ReportLab coordinates)
+            # We'll convert to PDF coordinates later
+            self._toc_links.append({
+                'rect': [50, y_position - 2, width - 50, y_position + 13],
+                'target_page': target_page,
+                'toc_page': page_num  # Current TOC page
+            })
+            
+            y_position -= 18
+            
+            # Start new page if needed
+            if y_position < 100:
+                can.showPage()
+                page_num += 1
+                y_position = height - 50
+        
+        self._toc_pages = page_num + 1  # Total TOC pages
+        
+        can.save()
+        packet.seek(0)
+        
+        # Save TOC
+        with open(output_path, 'wb') as f:
+            f.write(packet.getvalue())
+        
+        return output_path
+    
+    def add_links_to_pdf(self, pdf_path, output_path):
+        """Add clickable links to the table of contents."""
+        reader = PdfReader(str(pdf_path))
+        writer = PdfWriter()
+        
+        # Copy all pages first
+        for page in reader.pages:
+            writer.add_page(page)
+        
+        # Add links to TOC pages (pages 1 to self._toc_pages, since page 0 is title)
+        if hasattr(self, '_toc_links') and self._toc_links:
+            for link_info in self._toc_links:
+                toc_page_idx = 1 + link_info['toc_page']  # +1 because title page is first
+                target_page_idx = link_info['target_page'] - 1  # Convert to 0-based indexing
+                
+                # Make sure the target page exists
+                if target_page_idx < len(writer.pages) and toc_page_idx < len(writer.pages):
+                    rect = link_info['rect']
+                    
+                    # Convert ReportLab coordinates to PDF coordinates
+                    # ReportLab: (0,0) at bottom-left, PDF: (0,0) at bottom-left but different scale
+                    page_height = float(writer.pages[toc_page_idx].mediabox.height)
+                    pdf_rect = [
+                        rect[0],  # x1
+                        page_height - rect[3],  # y1 (flip Y coordinate)
+                        rect[2],  # x2  
+                        page_height - rect[1]   # y2 (flip Y coordinate)
+                    ]
+                    
+                    try:
+                        # Create link annotation
+                        annotation = AnnotationBuilder.link(
+                            rect=pdf_rect,
+                            target_page_index=target_page_idx
+                        )
+                        
+                        # Add annotation to the TOC page
+                        writer.add_annotation(page_number=toc_page_idx, annotation=annotation)
+                        
+                    except Exception as e:
+                        logger.warning(f"Could not add link annotation: {e}")
+        
+        # Write the PDF with links
+        with open(output_path, 'wb') as output_file:
+            writer.write(output_file)
+        
+        return True
+
+    def combine_pdfs_with_toc(self, pdf_paths, output_path, title_text="Dossier de Location"):
+        """Combine multiple PDFs with title page and table of contents."""
+        # First, analyze the documents to build TOC info
+        document_info = []
+        current_page = 1  # Start after title page
+        
+        # Title page will be page 1
+        current_page += 1  # TOC will start at page 2
+        
+        # Calculate TOC pages needed (estimate)
+        total_docs = len(pdf_paths)
+        estimated_toc_pages = max(1, (total_docs * 2) // 40)  # Rough estimate
+        current_page += estimated_toc_pages
+        
+        # Analyze each PDF to build document info
+        for pdf_path in pdf_paths:
+            try:
+                reader = PdfReader(str(pdf_path))
+                folder_name = pdf_path.name.split('_')[0]  # Extract folder name
+                
+                # Extract document name (before first -)
+                filename = pdf_path.stem
+                # Remove folder prefix and _watermarked suffix
+                clean_name = filename.replace(f"{folder_name}_", "").replace("_watermarked", "")
+                
+                # Improve document name extraction
+                if '-' in clean_name:
+                    doc_name = clean_name.split('-')[0]
+                else:
+                    doc_name = clean_name
+                
+                # Clean up common document types for better readability
+                doc_name_map = {
+                    'CNI': 'Carte d\'Identité',
+                    'RIB': 'Relevé d\'Identité Bancaire',
+                    'Avis_IR': 'Avis d\'Imposition',
+                    'Avis_d_impot': 'Avis d\'Imposition',
+                    'Bulletin_salaire': 'Bulletin de Salaire',
+                    'Justificatif_domicile': 'Justificatif de Domicile',
+                    'Attestation_pension': 'Attestation de Pension',
+                    'Taxe_foncière': 'Taxe Foncière',
+                    'Certificat_Scolarite': 'Certificat de Scolarité',
+                    'Quittances_loyer': 'Quittances de Loyer'
+                }
+                
+                # Replace with more readable names
+                for key, value in doc_name_map.items():
+                    if doc_name.startswith(key):
+                        doc_name = value
+                        # Add date info if present in filename
+                        if '2024' in clean_name or '2025' in clean_name:
+                            year_match = [x for x in ['2024', '2025'] if x in clean_name]
+                            if year_match:
+                                doc_name += f" ({year_match[0]})"
+                        break
+                
+                document_info.append({
+                    'folder': folder_name,
+                    'document': doc_name,
+                    'page': current_page,
+                    'num_pages': len(reader.pages)
+                })
+                
+                current_page += len(reader.pages)
+                
+            except Exception as e:
+                logger.error(f"Error analyzing {pdf_path}: {e}")
+        
+        # Create title page
+        title_temp = output_path.parent / "temp_title.pdf"
+        self.create_title_page(title_text, title_temp)
+        
+        # Create table of contents
+        toc_temp = output_path.parent / "temp_toc.pdf"
+        self.create_table_of_contents(document_info, toc_temp)
+        
+        # Combine everything
+        writer = PdfWriter()
+        
+        # Add title page
+        try:
+            title_reader = PdfReader(str(title_temp))
+            for page in title_reader.pages:
+                writer.add_page(page)
+            logger.info("Added title page to combined document")
+        except Exception as e:
+            logger.error(f"Error adding title page: {e}")
+        
+        # Add table of contents
+        try:
+            toc_reader = PdfReader(str(toc_temp))
+            for page in toc_reader.pages:
+                writer.add_page(page)
+            logger.info("Added table of contents to combined document")
+        except Exception as e:
+            logger.error(f"Error adding table of contents: {e}")
+        
+        # Add all document PDFs
+        for pdf_path in pdf_paths:
+            try:
+                reader = PdfReader(str(pdf_path))
+                for page in reader.pages:
+                    writer.add_page(page)
+                logger.info(f"Added {pdf_path.name} to combined document")
+            except Exception as e:
+                logger.error(f"Error adding {pdf_path} to combined document: {e}")
+        
+        # Write final combined PDF (without links first)
+        temp_combined = output_path.parent / "temp_combined.pdf"
+        try:
+            with open(temp_combined, 'wb') as output_file:
+                writer.write(output_file)
+            logger.info(f"Combined PDF (without links) saved temporarily")
+            
+            # Now add clickable links to the combined PDF
+            if hasattr(self, '_toc_links') and self._toc_links:
+                logger.info("Adding clickable links to table of contents...")
+                self.add_links_to_pdf(temp_combined, output_path)
+                logger.info(f"Combined PDF with clickable TOC saved: {output_path}")
+            else:
+                # If no links, just rename the temp file
+                temp_combined.rename(output_path)
+                logger.info(f"Combined PDF saved: {output_path}")
+            
+            # Clean up temporary files
+            try:
+                title_temp.unlink()
+                toc_temp.unlink()
+                if temp_combined.exists():
+                    temp_combined.unlink()
+            except Exception as e:
+                logger.warning(f"Could not clean up temporary files: {e}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error saving combined PDF: {e}")
+            return False
+
     def combine_pdfs(self, pdf_paths, output_path):
         """Combine multiple PDFs into a single document."""
         writer = PdfWriter()
@@ -190,7 +505,7 @@ def find_pdf_files(folder_path):
     unique_files = list(set(pdf_files))
     return [Path(f) for f in unique_files]
 
-def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION"):
+def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION", title_text="Dossier de Location"):
     """Process all folders in the source directory."""
     source_path = Path(source_folder)
     if not source_path.exists():
@@ -248,9 +563,9 @@ def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION
         # Sort PDFs by folder name and filename for consistent ordering
         unique_watermarked_pdfs.sort(key=lambda x: x.name)
         
-        # Combine all watermarked PDFs
+        # Combine all watermarked PDFs with title page and TOC
         combined_output = source_path / f"Dossier_Location_Complete_{watermark_text.replace(' ', '_')}.pdf"
-        if watermarker.combine_pdfs(unique_watermarked_pdfs, combined_output):
+        if watermarker.combine_pdfs_with_toc(unique_watermarked_pdfs, combined_output, title_text):
             logger.info(f"Successfully created combined document: {combined_output}")
             
             # Clean up temporary files
@@ -289,7 +604,8 @@ def main():
 Examples:
   python generate_loc_file.py -s ./Docs
   python generate_loc_file.py -s ./Docs -w "RESERVE POUR LOCATION APPARTEMENT"
-  python generate_loc_file.py --source ./Docs --watermark "CONFIDENTIEL - LOCATION"
+  python generate_loc_file.py -s ./Docs -t "Dossier Famille Dupont"
+  python generate_loc_file.py -s ./Docs -w "CONFIDENTIEL" -t "Documents Location Appartement"
         """
     )
     
@@ -307,13 +623,21 @@ Examples:
         help="Watermark text to apply to PDFs (default: 'DOCUMENT RESERVE A LA LOCATION')"
     )
     
+    parser.add_argument(
+        "-t", "--title",
+        type=str,
+        default="Dossier de Location",
+        help="Title for the document (default: 'Dossier de Location')"
+    )
+    
     args = parser.parse_args()
     
     logger.info(f"Starting PDF processing...")
     logger.info(f"Source folder: {args.source}")
     logger.info(f"Watermark text: {args.watermark}")
+    logger.info(f"Document title: {args.title}")
     
-    success = process_folder(args.source, args.watermark)
+    success = process_folder(args.source, args.watermark, args.title)
     
     if success:
         logger.info("Processing completed successfully!")
