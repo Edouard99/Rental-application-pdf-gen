@@ -118,8 +118,8 @@ python generate_loc_file.py -s ./RentalDocs -w "RESERVED FOR APARTMENT RENTAL" -
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--source` | `-s` | Input folder path | **Required** |
-| `--watermark` | `-w` | Watermark text | "DOCUMENT RESERVE A LA LOCATION" |
-| `--title` | `-t` | Document title | "Dossier de Location" |
+| `--watermark` | `-w` | Watermark text | "RESERVED FOR APARTMENT RENTAL" |
+| `--title` | `-t` | Document title | "Rental Application" |
 
 ## Output
 
