@@ -335,6 +335,44 @@ class PDFWatermarker:
             writer.write(output_file)
         
         return True
+    
+    def add_bookmarks_to_pdf(self, pdf_path, document_info, output_path):
+        """Add PDF bookmarks (signets) to the combined PDF."""
+        reader = PdfReader(str(pdf_path))
+        writer = PdfWriter()
+        
+        # Copy all pages
+        for page in reader.pages:
+            writer.add_page(page)
+        
+        # Add bookmarks
+        # First, add main sections
+        title_bookmark = writer.add_outline_item("Page de Titre", 0)
+        toc_bookmark = writer.add_outline_item("Table des Matières", 1)
+        
+        # Group documents by person and add bookmarks
+        current_person = None
+        person_bookmark = None
+        
+        for info in document_info:
+            folder_name = info['folder']
+            doc_name = info['document']
+            page_num = info['page'] - 1  # Convert to 0-based indexing
+            
+            # Create person bookmark if new person
+            if current_person != folder_name:
+                current_person = folder_name
+                person_bookmark = writer.add_outline_item(folder_name, page_num)
+            
+            # Add document bookmark under the person
+            if person_bookmark is not None:
+                writer.add_outline_item(doc_name, page_num, person_bookmark)
+        
+        # Write the PDF with bookmarks
+        with open(output_path, 'wb') as output_file:
+            writer.write(output_file)
+        
+        return True
 
     def combine_pdfs_with_toc(self, pdf_paths, output_path, title_text="Dossier de Location"):
         """Combine multiple PDFs with title page and table of contents."""
@@ -367,31 +405,7 @@ class PDFWatermarker:
                 else:
                     doc_name = clean_name
                 
-                # Clean up common document types for better readability
-                doc_name_map = {
-                    'CNI': 'Carte d\'Identité',
-                    'RIB': 'Relevé d\'Identité Bancaire',
-                    'Avis_IR': 'Avis d\'Imposition',
-                    'Avis_d_impot': 'Avis d\'Imposition',
-                    'Bulletin_salaire': 'Bulletin de Salaire',
-                    'Justificatif_domicile': 'Justificatif de Domicile',
-                    'Attestation_pension': 'Attestation de Pension',
-                    'Taxe_foncière': 'Taxe Foncière',
-                    'Certificat_Scolarite': 'Certificat de Scolarité',
-                    'Quittances_loyer': 'Quittances de Loyer'
-                }
-                
-                # Replace with more readable names
-                for key, value in doc_name_map.items():
-                    if doc_name.startswith(key):
-                        doc_name = value
-                        # Add date info if present in filename
-                        if '2024' in clean_name or '2025' in clean_name:
-                            year_match = [x for x in ['2024', '2025'] if x in clean_name]
-                            if year_match:
-                                doc_name += f" ({year_match[0]})"
-                        break
-                
+                doc_name = doc_name.replace('_', ' ').title()
                 document_info.append({
                     'folder': folder_name,
                     'document': doc_name,
@@ -453,12 +467,25 @@ class PDFWatermarker:
             # Now add clickable links to the combined PDF
             if hasattr(self, '_toc_links') and self._toc_links:
                 logger.info("Adding clickable links to table of contents...")
-                self.add_links_to_pdf(temp_combined, output_path)
-                logger.info(f"Combined PDF with clickable TOC saved: {output_path}")
+                temp_with_links = output_path.parent / "temp_with_links.pdf"
+                self.add_links_to_pdf(temp_combined, temp_with_links)
+                
+                # Now add bookmarks (signets) to the PDF
+                logger.info("Adding bookmarks (signets) to PDF...")
+                self.add_bookmarks_to_pdf(temp_with_links, document_info, output_path)
+                logger.info(f"Combined PDF with clickable TOC and bookmarks saved: {output_path}")
+                
+                # Clean up the intermediate file
+                try:
+                    temp_with_links.unlink()
+                except Exception as e:
+                    logger.warning(f"Could not clean up intermediate file: {e}")
+                    
             else:
-                # If no links, just rename the temp file
-                temp_combined.rename(output_path)
-                logger.info(f"Combined PDF saved: {output_path}")
+                # If no links, just add bookmarks
+                logger.info("Adding bookmarks (signets) to PDF...")
+                self.add_bookmarks_to_pdf(temp_combined, document_info, output_path)
+                logger.info(f"Combined PDF with bookmarks saved: {output_path}")
             
             # Clean up temporary files
             try:
