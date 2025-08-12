@@ -722,7 +722,7 @@ def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION
     watermarked_pdfs = []
     
     # Folders to exclude
-    exclude_folders = {"Dossier Location", "protected_files", "temp_watermarked"}
+    exclude_folders = {"temp_watermarked"}
     
     # Get all subfolders and sort them according to configuration
     all_folders = [folder for folder in source_path.iterdir() 
