@@ -194,6 +194,28 @@ class PDFWatermarker:
         
         return output_path
     
+    def create_person_separator_page(self, person_name, output_path):
+        """Create a separator page for a person's documents."""
+        packet = BytesIO()
+        can = canvas.Canvas(packet, pagesize=A4)
+        
+        width, height = A4
+        
+        # Set person name
+        can.setFont("Helvetica-Bold", 20)
+        name_text = f"{person_name} - Documents"
+        name_width = can.stringWidth(name_text, "Helvetica-Bold", 20)
+        can.drawString((width - name_width) / 2, height * 0.5, name_text)
+        
+        can.save()
+        packet.seek(0)
+        
+        # Save separator page
+        with open(output_path, 'wb') as f:
+            f.write(packet.getvalue())
+        
+        return output_path
+
     def create_table_of_contents(self, document_info, output_path):
         """Create a table of contents PDF with clickable links."""
         packet = BytesIO()
@@ -221,56 +243,85 @@ class PDFWatermarker:
             folder_name = info['folder']
             doc_name = info['document']
             target_page = info['page']
+            is_separator = info.get('is_separator', False)
             
-            # Check if we need a new person header
-            if current_person != folder_name:
-                current_person = folder_name
+            if is_separator:
+                # This is a separator page - show it as a main section
                 y_position -= 20
-                
-                # Person name (folder name)
                 can.setFont("Helvetica-Bold", 14)
                 can.setFillColor(black)
-                can.drawString(50, y_position, folder_name)
-                y_position -= 25
-            
-            # Document entry
-            can.setFont("Helvetica", 11)
-            can.setFillColor(blue)
-            
-            # Create dots for alignment
-            doc_text = f"    {doc_name}"
-            page_text = f"page {target_page}"
-            
-            # Calculate positions
-            doc_width = can.stringWidth(doc_text, "Helvetica", 11)
-            page_width = can.stringWidth(page_text, "Helvetica", 11)
-            
-            # Draw document name (this will be the clickable area)
-            can.drawString(50, y_position, doc_text)
-            
-            # Draw dots
-            dots_start = 50 + doc_width + 10
-            dots_end = width - 50 - page_width - 10
-            dots_length = dots_end - dots_start
-            num_dots = int(dots_length / 4)  # Approximate spacing
-            
-            can.setFillColor(black)
-            dot_text = "." * max(0, num_dots)
-            can.drawString(dots_start, y_position, dot_text)
-            
-            # Draw page number
-            can.setFillColor(blue)
-            can.drawString(width - 50 - page_width, y_position, page_text)
-            
-            # Store link information (coordinates are in ReportLab coordinates)
-            # We'll convert to PDF coordinates later
-            self._toc_links.append({
-                'rect': [50, y_position - 2, width - 50, y_position + 13],
-                'target_page': target_page,
-                'toc_page': page_num  # Current TOC page
-            })
-            
-            y_position -= 18
+                
+                # Create the separator page entry - show only person name in TOC
+                sep_text = folder_name  # Just the person's name/alias
+                page_text = f"page {target_page}"
+                
+                # Calculate positions
+                sep_width = can.stringWidth(sep_text, "Helvetica-Bold", 14)
+                page_width = can.stringWidth(page_text, "Helvetica-Bold", 14)
+                
+                # Draw separator page name
+                can.drawString(50, y_position, sep_text)
+                
+                # Draw dots
+                dots_start = 50 + sep_width + 10
+                dots_end = width - 50 - page_width - 10
+                dots_length = dots_end - dots_start
+                num_dots = int(dots_length / 4)
+                
+                dot_text = "." * max(0, num_dots)
+                can.drawString(dots_start, y_position, dot_text)
+                
+                # Draw page number
+                can.drawString(width - 50 - page_width, y_position, page_text)
+                
+                # Store link for separator page
+                self._toc_links.append({
+                    'rect': [50, y_position - 2, width - 50, y_position + 16],
+                    'target_page': target_page,
+                    'toc_page': page_num
+                })
+                
+                y_position -= 30
+                current_person = folder_name
+                
+            else:
+                # This is a regular document
+                can.setFont("Helvetica", 11)
+                can.setFillColor(blue)
+                
+                # Create dots for alignment
+                doc_text = f"    {doc_name}"
+                page_text = f"page {target_page}"
+                
+                # Calculate positions
+                doc_width = can.stringWidth(doc_text, "Helvetica", 11)
+                page_width = can.stringWidth(page_text, "Helvetica", 11)
+                
+                # Draw document name
+                can.drawString(50, y_position, doc_text)
+                
+                # Draw dots
+                dots_start = 50 + doc_width + 10
+                dots_end = width - 50 - page_width - 10
+                dots_length = dots_end - dots_start
+                num_dots = int(dots_length / 4)
+                
+                can.setFillColor(black)
+                dot_text = "." * max(0, num_dots)
+                can.drawString(dots_start, y_position, dot_text)
+                
+                # Draw page number
+                can.setFillColor(blue)
+                can.drawString(width - 50 - page_width, y_position, page_text)
+                
+                # Store link for document
+                self._toc_links.append({
+                    'rect': [50, y_position - 2, width - 50, y_position + 13],
+                    'target_page': target_page,
+                    'toc_page': page_num
+                })
+                
+                y_position -= 18
             
             # Start new page if needed
             if y_position < 100:
@@ -359,15 +410,16 @@ class PDFWatermarker:
             folder_name = info['folder']
             doc_name = info['document']
             page_num = info['page'] - 1  # Convert to 0-based indexing
+            is_separator = info.get('is_separator', False)
             
-            # Create person bookmark if new person
-            if current_person != folder_name:
+            if is_separator:
+                # This is a separator page - create person bookmark pointing to it
                 current_person = folder_name
-                person_bookmark = writer.add_outline_item(folder_name, page_num)
-            
-            # Add document bookmark under the person
-            if person_bookmark is not None:
-                writer.add_outline_item(doc_name, page_num, person_bookmark)
+                person_bookmark = writer.add_outline_item(folder_name, page_num)  # Just the person's name
+            else:
+                # Add document bookmark under the person
+                if person_bookmark is not None:
+                    writer.add_outline_item(doc_name, page_num, person_bookmark)
         
         # Write the PDF with bookmarks
         with open(output_path, 'wb') as output_file:
@@ -389,42 +441,66 @@ class PDFWatermarker:
         estimated_toc_pages = max(1, (total_docs * 2) // 40)  # Rough estimate
         current_page += estimated_toc_pages
         
-        # Analyze each PDF to build document info
+        # Analyze each PDF to build document info with separator pages
         if generation_config is None:
             generation_config = {}
-            
+        
+        # First, group PDFs by person
+        person_docs = {}
         for pdf_path in pdf_paths:
             try:
                 reader = PdfReader(str(pdf_path))
                 folder_name = pdf_path.name.split('_')[0]  # Extract folder name
-                
-                # Get display name for folder (using alias if configured)
                 display_name = get_folder_display_name(folder_name, generation_config)
                 
-                # Extract document name (before first -)
+                # Extract document name
                 filename = pdf_path.stem
-                # Remove folder prefix and _watermarked suffix
                 clean_name = filename.replace(f"{folder_name}_", "").replace("_watermarked", "")
                 
-                # Improve document name extraction
                 if '-' in clean_name:
                     doc_name = clean_name.split('-')[0]
                 else:
                     doc_name = clean_name
                 
                 doc_name = doc_name.replace('_', ' ').title()
-                document_info.append({
-                    'folder': display_name,  # Use display name instead of folder_name
-                    'original_folder': folder_name,  # Keep original for reference
-                    'document': doc_name,
-                    'page': current_page,
-                    'num_pages': len(reader.pages)
-                })
                 
-                current_page += len(reader.pages)
+                if display_name not in person_docs:
+                    person_docs[display_name] = []
+                
+                person_docs[display_name].append({
+                    'pdf_path': pdf_path,
+                    'doc_name': doc_name,
+                    'num_pages': len(reader.pages),
+                    'original_folder': folder_name
+                })
                 
             except Exception as e:
                 logger.error(f"Error analyzing {pdf_path}: {e}")
+        
+        # Now build document_info with separator pages
+        for person_name, docs in person_docs.items():
+            # Add separator page entry
+            document_info.append({
+                'folder': person_name,
+                'document': f"{person_name} - Documents",
+                'page': current_page,
+                'num_pages': 1,
+                'is_separator': True
+            })
+            current_page += 1
+            
+            # Add all documents for this person
+            for doc in docs:
+                document_info.append({
+                    'folder': person_name,
+                    'original_folder': doc['original_folder'],
+                    'document': doc['doc_name'],
+                    'page': current_page,
+                    'num_pages': doc['num_pages'],
+                    'pdf_path': doc['pdf_path'],
+                    'is_separator': False
+                })
+                current_page += doc['num_pages']
         
         # Create title page
         title_temp = output_path.parent / "temp_title.pdf"
@@ -455,15 +531,37 @@ class PDFWatermarker:
         except Exception as e:
             logger.error(f"Error adding table of contents: {e}")
         
-        # Add all document PDFs
-        for pdf_path in pdf_paths:
-            try:
-                reader = PdfReader(str(pdf_path))
-                for page in reader.pages:
-                    writer.add_page(page)
-                logger.info(f"Added {pdf_path.name} to combined document")
-            except Exception as e:
-                logger.error(f"Error adding {pdf_path} to combined document: {e}")
+        # Add all document PDFs with separator pages
+        current_person = None
+        temp_separator_files = []
+        
+        for info in document_info:
+            if info.get('is_separator', False):
+                # Create and add separator page
+                separator_file = output_path.parent / f"temp_separator_{info['folder'].replace(' ', '_')}.pdf"
+                self.create_person_separator_page(info['folder'], separator_file)
+                temp_separator_files.append(separator_file)
+                
+                try:
+                    separator_reader = PdfReader(str(separator_file))
+                    for page in separator_reader.pages:
+                        writer.add_page(page)
+                    logger.info(f"Added separator page for {info['folder']}")
+                except Exception as e:
+                    logger.error(f"Error adding separator page for {info['folder']}: {e}")
+                    
+                current_person = info['folder']
+                
+            else:
+                # Add the actual document
+                pdf_path = info['pdf_path']
+                try:
+                    reader = PdfReader(str(pdf_path))
+                    for page in reader.pages:
+                        writer.add_page(page)
+                    logger.info(f"Added {pdf_path.name} to combined document")
+                except Exception as e:
+                    logger.error(f"Error adding {pdf_path} to combined document: {e}")
         
         # Write final combined PDF (without links first)
         temp_combined = output_path.parent / "temp_combined.pdf"
@@ -501,6 +599,10 @@ class PDFWatermarker:
                 toc_temp.unlink()
                 if temp_combined.exists():
                     temp_combined.unlink()
+                # Clean up separator files
+                for sep_file in temp_separator_files:
+                    if sep_file.exists():
+                        sep_file.unlink()
             except Exception as e:
                 logger.warning(f"Could not clean up temporary files: {e}")
             
