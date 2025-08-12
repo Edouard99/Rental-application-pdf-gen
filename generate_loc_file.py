@@ -11,6 +11,7 @@ from pathlib import Path
 import glob
 from io import BytesIO
 import logging
+import json
 
 try:
     from reportlab.pdfgen import canvas
@@ -374,7 +375,7 @@ class PDFWatermarker:
         
         return True
 
-    def combine_pdfs_with_toc(self, pdf_paths, output_path, title_text="Dossier de Location"):
+    def combine_pdfs_with_toc(self, pdf_paths, output_path, title_text="Dossier de Location", generation_config=None):
         """Combine multiple PDFs with title page and table of contents."""
         # First, analyze the documents to build TOC info
         document_info = []
@@ -389,10 +390,16 @@ class PDFWatermarker:
         current_page += estimated_toc_pages
         
         # Analyze each PDF to build document info
+        if generation_config is None:
+            generation_config = {}
+            
         for pdf_path in pdf_paths:
             try:
                 reader = PdfReader(str(pdf_path))
                 folder_name = pdf_path.name.split('_')[0]  # Extract folder name
+                
+                # Get display name for folder (using alias if configured)
+                display_name = get_folder_display_name(folder_name, generation_config)
                 
                 # Extract document name (before first -)
                 filename = pdf_path.stem
@@ -407,7 +414,8 @@ class PDFWatermarker:
                 
                 doc_name = doc_name.replace('_', ' ').title()
                 document_info.append({
-                    'folder': folder_name,
+                    'folder': display_name,  # Use display name instead of folder_name
+                    'original_folder': folder_name,  # Keep original for reference
                     'document': doc_name,
                     'page': current_page,
                     'num_pages': len(reader.pages)
@@ -523,11 +531,67 @@ class PDFWatermarker:
             logger.error(f"Error saving combined PDF: {e}")
             return False
 
+def load_generation_config(source_path):
+    """Load configuration from generation.json if it exists."""
+    config_file = source_path / "generation.json"
+    
+    if not config_file.exists():
+        logger.info("No generation.json found, using default folder processing")
+        return {}
+    
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        logger.info(f"Loaded generation.json with {len(config)} folder configurations")
+        return config
+    except Exception as e:
+        logger.error(f"Error loading generation.json: {e}")
+        return {}
+
+def sort_folders_by_config(folders, config):
+    """Sort folders according to generation.json configuration."""
+    # Separate folders that are in config vs those that aren't
+    configured_folders = []
+    unconfigured_folders = []
+    
+    for folder in folders:
+        if folder.name in config:
+            folder_config = config[folder.name]
+            order = folder_config.get('order', 999)  # Default high order for unconfigured order
+            configured_folders.append((folder, order))
+        else:
+            unconfigured_folders.append(folder)
+    
+    # Sort configured folders by order
+    configured_folders.sort(key=lambda x: x[1])
+    
+    # Extract just the folder objects
+    sorted_configured = [folder for folder, order in configured_folders]
+    
+    # Return configured folders first, then unconfigured
+    result = sorted_configured + unconfigured_folders
+    
+    if configured_folders:
+        logger.info(f"Folder processing order: {[f.name for f in result]}")
+    
+    return result
+
+def get_folder_display_name(folder_name, config):
+    """Get the display name for a folder (using alias if configured)."""
+    if folder_name in config:
+        alias = config[folder_name].get('alias')
+        if alias:
+            logger.info(f"Using alias '{alias}' for folder '{folder_name}'")
+            return alias
+    
+    return folder_name
+
 def find_pdf_files(folder_path):
     """Find all PDF files in a folder."""
     pdf_files = []
     for ext in ['*.pdf', '*.PDF']:
         pdf_files.extend(glob.glob(str(folder_path / ext)))
+    print(str(folder_path))
     # Remove duplicates by converting to set and back to list
     unique_files = list(set(pdf_files))
     return [Path(f) for f in unique_files]
@@ -543,6 +607,9 @@ def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION
     temp_dir = source_path / "temp_watermarked"
     temp_dir.mkdir(exist_ok=True)
     
+    # Load generation configuration
+    generation_config = load_generation_config(source_path)
+    
     # Initialize watermarker
     watermarker = PDFWatermarker(watermark_text)
     
@@ -552,31 +619,37 @@ def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION
     # Folders to exclude
     exclude_folders = {"Dossier Location", "protected_files", "temp_watermarked"}
     
-    # Process each subfolder
-    for folder in source_path.iterdir():
-        if folder.is_dir() and folder.name not in exclude_folders:
-            logger.info(f"Processing folder: {folder.name}")
+    # Get all subfolders and sort them according to configuration
+    all_folders = [folder for folder in source_path.iterdir() 
+                   if folder.is_dir() and folder.name not in exclude_folders]
+    
+    # Sort folders according to generation.json configuration
+    sorted_folders = sort_folders_by_config(all_folders, generation_config)
+    
+    # Process each subfolder in the sorted order
+    for folder in sorted_folders:
+        logger.info(f"Processing folder: {folder.name}")
+        
+        # Find all PDF files in this folder
+        pdf_files = find_pdf_files(folder)
+        
+        if not pdf_files:
+            logger.info(f"No PDF files found in {folder.name}")
+            continue
+        
+        # Process each PDF file
+        for pdf_file in pdf_files:
+            # Create output filename with sanitized path
+            output_filename = f"{folder.name}_{pdf_file.stem}_watermarked.pdf"
+            output_path = temp_dir / output_filename
             
-            # Find all PDF files in this folder
-            pdf_files = find_pdf_files(folder)
-            
-            if not pdf_files:
-                logger.info(f"No PDF files found in {folder.name}")
+            # Skip if already processed (avoid duplicates)
+            if output_path in watermarked_pdfs:
                 continue
             
-            # Process each PDF file
-            for pdf_file in pdf_files:
-                # Create output filename with sanitized path
-                output_filename = f"{folder.name}_{pdf_file.stem}_watermarked.pdf"
-                output_path = temp_dir / output_filename
-                
-                # Skip if already processed (avoid duplicates)
-                if output_path in watermarked_pdfs:
-                    continue
-                
-                # Apply watermark
-                if watermarker.watermark_pdf(pdf_file, output_path):
-                    watermarked_pdfs.append(output_path)
+            # Apply watermark
+            if watermarker.watermark_pdf(pdf_file, output_path):
+                watermarked_pdfs.append(output_path)
     
     if watermarked_pdfs:
         # Remove duplicates from the list while preserving order
@@ -587,12 +660,12 @@ def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION
                 unique_watermarked_pdfs.append(pdf_path)
                 seen.add(pdf_path)
         
-        # Sort PDFs by folder name and filename for consistent ordering
-        unique_watermarked_pdfs.sort(key=lambda x: x.name)
+        # Note: We don't sort here because we want to preserve the order from generation.json
+        # The folders were already processed in the correct order based on the configuration
         
         # Combine all watermarked PDFs with title page and TOC
         combined_output = source_path / f"Dossier_Location_Complete_{watermark_text.replace(' ', '_')}.pdf"
-        if watermarker.combine_pdfs_with_toc(unique_watermarked_pdfs, combined_output, title_text):
+        if watermarker.combine_pdfs_with_toc(unique_watermarked_pdfs, combined_output, title_text, generation_config):
             logger.info(f"Successfully created combined document: {combined_output}")
             
             # Clean up temporary files
