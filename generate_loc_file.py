@@ -479,6 +479,9 @@ class PDFWatermarker:
         
         # Now build document_info with separator pages
         for person_name, docs in person_docs.items():
+            # Sort documents alphabetically by document name
+            docs.sort(key=lambda x: x['doc_name'])
+            
             # Add separator page entry
             document_info.append({
                 'folder': person_name,
@@ -489,7 +492,7 @@ class PDFWatermarker:
             })
             current_page += 1
             
-            # Add all documents for this person
+            # Add all documents for this person (now sorted alphabetically)
             for doc in docs:
                 document_info.append({
                     'folder': person_name,
@@ -766,7 +769,9 @@ def process_folder(source_folder, watermark_text="DOCUMENT RESERVE A LA LOCATION
         # The folders were already processed in the correct order based on the configuration
         
         # Combine all watermarked PDFs with title page and TOC
-        combined_output = source_path / f"Dossier_Location_Complete_{watermark_text.replace(' ', '_')}.pdf"
+        # Create filename from title, replacing spaces and special characters
+        safe_title = title_text.replace(' ', '_').replace('-', '_').replace('/', '_').replace('\\', '_')
+        combined_output = source_path / f"{safe_title}.pdf"
         if watermarker.combine_pdfs_with_toc(unique_watermarked_pdfs, combined_output, title_text, generation_config):
             logger.info(f"Successfully created combined document: {combined_output}")
             
